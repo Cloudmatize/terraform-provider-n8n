@@ -1,0 +1,88 @@
+name: AI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+
+jobs:
+  parse-pr:
+    if: github.event_name == 'issue_comment'
+    runs-on: ubuntu-latest
+    outputs:
+      base_ref: ${{ steps.get-pr.outputs.base_ref }}
+      head_ref: ${{ steps.get-pr.outputs.head_ref }}
+      pr_number: ${{ steps.get-pr.outputs.pr_number }}
+    steps:
+      - id: get-pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PR_DATA=$(gh api repos/${{ github.repository }}/pulls/${{ github.event.issue.number }})
+          echo "base_ref=$(echo $PR_DATA | jq -r .base.ref)" >> "$GITHUB_OUTPUT"
+          echo "head_ref=$(echo $PR_DATA | jq -r .head.ref)" >> "$GITHUB_OUTPUT"
+          echo "pr_number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+
+  summary:
+    needs: parse-pr
+    if: >
+      always() &&
+      (github.event_name == 'pull_request' ||
+       (github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        startsWith(github.event.comment.body, '/review') &&
+        contains(github.event.comment.body, 'summary'))) &&
+      (needs.parse-pr.result == 'success' || github.event_name == 'pull_request')
+    uses: Cloudmatize/.github/.github/workflows/ai-review-summary.yaml@main
+    with:
+      pr_number: ${{ needs.parse-pr.outputs.pr_number || github.event.pull_request.number }}
+      base_ref: ${{ needs.parse-pr.outputs.base_ref || github.base_ref }}
+      head_ref: ${{ needs.parse-pr.outputs.head_ref || github.head_ref }}
+    secrets:
+      GEMINI_CODE_REVIEW_API: ${{ secrets.GEMINI_CODE_REVIEW_API }}
+
+  review:
+    needs: parse-pr
+    if: >
+      always() &&
+      (github.event_name == 'pull_request' ||
+       (github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        startsWith(github.event.comment.body, '/review') &&
+        !contains(github.event.comment.body, 'summary') &&
+        !contains(github.event.comment.body, 'help'))) &&
+      (needs.parse-pr.result == 'success' || github.event_name == 'pull_request')
+    uses: Cloudmatize/.github/.github/workflows/ai-review.yaml@main
+    with:
+      pr_number: ${{ needs.parse-pr.outputs.pr_number || github.event.pull_request.number }}
+      base_ref: ${{ needs.parse-pr.outputs.base_ref || github.base_ref }}
+      head_ref: ${{ needs.parse-pr.outputs.head_ref || github.head_ref }}
+    secrets:
+      GEMINI_CODE_REVIEW_API: ${{ secrets.GEMINI_CODE_REVIEW_API }}
+
+  help:
+    if: >
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/review') &&
+      contains(github.event.comment.body, 'help')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post help
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = "## 🤖 4SMART AI Code Review - Comandos\n\n" +
+              "| Comando | Descrição |\n" +
+              "|---------|-----------|\n" +
+              "| `/review` | Review completo do código |\n" +
+              "| `/review summary` | Resumo das mudanças |\n" +
+              "| `/review help` | Mostra esta ajuda |";
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
