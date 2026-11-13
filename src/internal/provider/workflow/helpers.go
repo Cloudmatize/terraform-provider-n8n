@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
+	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -20,6 +22,10 @@ import (
 // CALLER_POLICY_DEFAULT is the default value for the CallerPolicy workflow setting.
 // The n8n API returns this value even when not explicitly set by the user.
 const CALLER_POLICY_DEFAULT string = "workflowsFromSameOwner"
+
+// SETTINGS_RESET_VALUE is the value n8n removes from stored workflow settings on update,
+// restoring the instance default for that setting.
+const SETTINGS_RESET_VALUE string = "DEFAULT"
 
 // parseWorkflowJSON parses the JSON fields from a workflow model.
 //
@@ -331,6 +337,75 @@ func normalizeWorkflowSettings(settings n8nsdk.WorkflowSettings) n8nsdk.Workflow
 
 	// Return result.
 	return normalized
+}
+
+// resetRemovedWorkflowSettings marks settings removed from settings_json so n8n drops them.
+// The n8n API merges the submitted settings into the stored ones on update, so omitting a key
+// keeps its previous value and the API response no longer matches the plan, which causes
+// "Provider produced inconsistent result after apply". Each key present in state but absent
+// from the plan is sent with a value that n8n deletes ("DEFAULT") or that normalization removes
+// from state (default callerPolicy, availableInMCP=false). Keys the public API cannot reset
+// produce an error before any request is sent.
+//
+// Params:
+//   - settings: Settings parsed from the plan, updated in place
+//   - planSettingsJSON: settings_json value from the plan
+//   - stateSettingsJSON: settings_json value from the current state
+//   - diags: Diagnostics for error reporting
+func resetRemovedWorkflowSettings(settings *n8nsdk.WorkflowSettings, planSettingsJSON, stateSettingsJSON types.String, diags *diag.Diagnostics) {
+	// Without known plan and state values there is no removal to detect.
+	if planSettingsJSON.IsNull() || planSettingsJSON.IsUnknown() || stateSettingsJSON.IsNull() || stateSettingsJSON.IsUnknown() {
+		return
+	}
+
+	var stateSettings map[string]any
+	// State is written by the provider; ignore content that is not a JSON object.
+	if err := json.Unmarshal([]byte(stateSettingsJSON.ValueString()), &stateSettings); err != nil {
+		return
+	}
+
+	planSettings, err := settings.ToMap()
+	// Check for serialization error.
+	if err != nil {
+		diags.AddError("Invalid settings JSON", fmt.Sprintf("Could not serialize settings_json: %s", err.Error()))
+		return
+	}
+
+	unsupported := []string{}
+	// Reset every key that exists in state but was removed from the plan.
+	for key := range stateSettings {
+		// Skip keys still declared in the plan.
+		if _, declared := planSettings[key]; declared {
+			continue
+		}
+		// Pick the reset value accepted by the public API for this key.
+		switch key {
+		case "errorWorkflow":
+			settings.SetErrorWorkflow(SETTINGS_RESET_VALUE)
+		case "timezone":
+			settings.SetTimezone(SETTINGS_RESET_VALUE)
+		case "callerPolicy":
+			settings.SetCallerPolicy(CALLER_POLICY_DEFAULT)
+		case "availableInMCP":
+			settings.SetAvailableInMCP(false)
+		default:
+			unsupported = append(unsupported, key)
+		}
+	}
+
+	// Fail before the update when a removed key cannot be reset through the API.
+	if len(unsupported) > 0 {
+		slices.Sort(unsupported)
+		diags.AddError(
+			"Workflow settings cannot be removed",
+			fmt.Sprintf(
+				"The settings [%s] are stored in n8n but missing from settings_json. "+
+					"The n8n API merges settings on update and cannot reset these keys. "+
+					"Declare them in settings_json or reset them in the n8n UI.",
+				strings.Join(unsupported, ", "),
+			),
+		)
+	}
 }
 
 // convertTagIDsToTagIdsInner converts string tag IDs to SDK TagIdsInner format.
