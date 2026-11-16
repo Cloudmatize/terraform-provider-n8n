@@ -20,7 +20,7 @@ import (
 )
 
 // WORKFLOW_ATTRIBUTES_SIZE defines the initial capacity for workflow attributes map.
-const WORKFLOW_ATTRIBUTES_SIZE int = 15
+const WORKFLOW_ATTRIBUTES_SIZE int = 16
 
 // Ensure WorkflowResource implements required interfaces.
 var (
@@ -117,6 +117,7 @@ func (r *WorkflowResource) schemaAttributes() map[string]schema.Attribute {
 
 	r.addCoreAttributes(attrs)
 	r.addJSONAttributes(attrs)
+	r.addSettingsOptionAttributes(attrs)
 	r.addMetadataAttributes(attrs)
 
 	// Return schema attributes.
@@ -169,9 +170,20 @@ func (r *WorkflowResource) addJSONAttributes(attrs map[string]schema.Attribute) 
 		Computed:            true,
 	}
 	attrs["settings_json"] = schema.StringAttribute{
-		MarkdownDescription: "Workflow settings as JSON string. Must be valid JSON object. Keys removed from this value are reset in n8n on update (`callerPolicy`, `availableInMCP`, `timezone` on n8n >= 1.123, `errorWorkflow` on n8n >= 2.5); on older n8n versions the previous value is restored and the update fails. Other keys cannot be removed through the API and must be kept or reset in the n8n UI.",
+		MarkdownDescription: "Workflow settings as JSON string. Must be valid JSON object. Keys removed from this value are reset in n8n on update: `callerPolicy`, `availableInMCP`, `timezone` (n8n >= 1.123) and, with `allow_error_workflow_reset`, `errorWorkflow` (n8n >= 2.5). On older n8n versions the previous value is restored and the update fails. Other keys cannot be removed through the API and must be kept or reset in the n8n UI.",
 		Optional:            true,
 		Computed:            true,
+	}
+}
+
+// addSettingsOptionAttributes adds the attributes that control how settings_json is applied.
+//
+// Params:
+//   - attrs: attribute map to populate
+func (r *WorkflowResource) addSettingsOptionAttributes(attrs map[string]schema.Attribute) {
+	attrs["allow_error_workflow_reset"] = schema.BoolAttribute{
+		MarkdownDescription: "Allow removing `errorWorkflow` from `settings_json` by resetting it to `DEFAULT`. Requires n8n >= 2.5: older versions store `DEFAULT` as a workflow ID, which skips the workflow's own Error Trigger. The provider checks the update response and restores the previous value when `DEFAULT` is kept; when the response is lost, it warns to check the setting in the n8n UI. Defaults to false, in which case removing `errorWorkflow` fails before any request.",
+		Optional:            true,
 	}
 }
 

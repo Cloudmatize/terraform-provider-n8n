@@ -22,10 +22,11 @@ n8n workflow resource using generated SDK
 ### Optional
 
 - `active` (Boolean) Whether the workflow is active
+- `allow_error_workflow_reset` (Boolean) Allow removing `errorWorkflow` from `settings_json` by resetting it to `DEFAULT`. Requires n8n >= 2.5: older versions store `DEFAULT` as a workflow ID, which skips the workflow's own Error Trigger. The provider checks the update response and restores the previous value when `DEFAULT` is kept; when the response is lost, it warns to check the setting in the n8n UI. Defaults to false, in which case removing `errorWorkflow` fails before any request.
 - `connections_json` (String) Workflow connections as JSON string. Must be valid JSON object mapping node connections.
 - `nodes_json` (String) Workflow nodes as JSON string. Must be valid JSON array of node objects.
 - `project_id` (String) Project ID where the workflow should be created. If not specified, workflow is created in the default 'Overview' location. The workflow can be transferred to a different project by updating this value. Note: Once assigned to a project, a workflow cannot be moved back to the Overview location due to n8n API limitations.
-- `settings_json` (String) Workflow settings as JSON string. Must be valid JSON object. Keys removed from this value are reset in n8n on update (`callerPolicy`, `availableInMCP`, `timezone` on n8n >= 1.123, `errorWorkflow` on n8n >= 2.5); on older n8n versions the previous value is restored and the update fails. Other keys cannot be removed through the API and must be kept or reset in the n8n UI.
+- `settings_json` (String) Workflow settings as JSON string. Must be valid JSON object. Keys removed from this value are reset in n8n on update: `callerPolicy`, `availableInMCP`, `timezone` (n8n >= 1.123) and, with `allow_error_workflow_reset`, `errorWorkflow` (n8n >= 2.5). On older n8n versions the previous value is restored and the update fails. Other keys cannot be removed through the API and must be kept or reset in the n8n UI.
 - `tags` (Set of String) Set of tag IDs associated with this workflow
 
 ### Read-Only

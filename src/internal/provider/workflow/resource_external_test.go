@@ -435,21 +435,22 @@ func TestWorkflowResource_ImportState(t *testing.T) {
 
 	// Initialize the raw value with required attributes
 	state.Raw = tftypes.NewValue(schemaResp.Schema.Type().TerraformType(ctx), map[string]tftypes.Value{
-		"id":               tftypes.NewValue(tftypes.String, nil),
-		"name":             tftypes.NewValue(tftypes.String, nil),
-		"active":           tftypes.NewValue(tftypes.Bool, nil),
-		"tags":             tftypes.NewValue(tftypes.Set{ElementType: tftypes.String}, nil),
-		"project_id":       tftypes.NewValue(tftypes.String, nil),
-		"nodes_json":       tftypes.NewValue(tftypes.String, nil),
-		"connections_json": tftypes.NewValue(tftypes.String, nil),
-		"settings_json":    tftypes.NewValue(tftypes.String, nil),
-		"created_at":       tftypes.NewValue(tftypes.String, nil),
-		"updated_at":       tftypes.NewValue(tftypes.String, nil),
-		"version_id":       tftypes.NewValue(tftypes.String, nil),
-		"is_archived":      tftypes.NewValue(tftypes.Bool, nil),
-		"trigger_count":    tftypes.NewValue(tftypes.Number, nil),
-		"meta":             tftypes.NewValue(tftypes.Map{ElementType: tftypes.String}, nil),
-		"pin_data":         tftypes.NewValue(tftypes.Map{ElementType: tftypes.String}, nil),
+		"id":                         tftypes.NewValue(tftypes.String, nil),
+		"name":                       tftypes.NewValue(tftypes.String, nil),
+		"active":                     tftypes.NewValue(tftypes.Bool, nil),
+		"tags":                       tftypes.NewValue(tftypes.Set{ElementType: tftypes.String}, nil),
+		"project_id":                 tftypes.NewValue(tftypes.String, nil),
+		"nodes_json":                 tftypes.NewValue(tftypes.String, nil),
+		"connections_json":           tftypes.NewValue(tftypes.String, nil),
+		"settings_json":              tftypes.NewValue(tftypes.String, nil),
+		"allow_error_workflow_reset": tftypes.NewValue(tftypes.Bool, nil),
+		"created_at":                 tftypes.NewValue(tftypes.String, nil),
+		"updated_at":                 tftypes.NewValue(tftypes.String, nil),
+		"version_id":                 tftypes.NewValue(tftypes.String, nil),
+		"is_archived":                tftypes.NewValue(tftypes.Bool, nil),
+		"trigger_count":              tftypes.NewValue(tftypes.Number, nil),
+		"meta":                       tftypes.NewValue(tftypes.Map{ElementType: tftypes.String}, nil),
+		"pin_data":                   tftypes.NewValue(tftypes.Map{ElementType: tftypes.String}, nil),
 	})
 
 	req := resource.ImportStateRequest{

@@ -20,11 +20,13 @@ type Resource struct {
 	NodesJSON       types.String `tfsdk:"nodes_json"`
 	ConnectionsJSON types.String `tfsdk:"connections_json"`
 	SettingsJSON    types.String `tfsdk:"settings_json"`
-	CreatedAt       types.String `tfsdk:"created_at"`
-	UpdatedAt       types.String `tfsdk:"updated_at"`
-	VersionID       types.String `tfsdk:"version_id"`
-	IsArchived      types.Bool   `tfsdk:"is_archived"`
-	TriggerCount    types.Int64  `tfsdk:"trigger_count"`
-	Meta            types.Map    `tfsdk:"meta"`
-	PinData         types.Map    `tfsdk:"pin_data"`
+	// AllowErrorWorkflowReset opts in to resetting errorWorkflow when it is removed from settings_json.
+	AllowErrorWorkflowReset types.Bool   `tfsdk:"allow_error_workflow_reset"`
+	CreatedAt               types.String `tfsdk:"created_at"`
+	UpdatedAt               types.String `tfsdk:"updated_at"`
+	VersionID               types.String `tfsdk:"version_id"`
+	IsArchived              types.Bool   `tfsdk:"is_archived"`
+	TriggerCount            types.Int64  `tfsdk:"trigger_count"`
+	Meta                    types.Map    `tfsdk:"meta"`
+	PinData                 types.Map    `tfsdk:"pin_data"`
 }

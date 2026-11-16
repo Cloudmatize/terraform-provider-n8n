@@ -1601,6 +1601,7 @@ func Test_resetRemovedWorkflowSettings(t *testing.T) {
 		name        string
 		planJSON    types.String
 		stateJSON   types.String
+		allowReset  bool
 		want        map[string]any
 		expectError string
 	}{
@@ -1617,10 +1618,17 @@ func Test_resetRemovedWorkflowSettings(t *testing.T) {
 			want:      map[string]any{"errorWorkflow": "wf-err", "executionOrder": "v1", "timezone": SETTINGS_RESET_VALUE},
 		},
 		{
-			name:      "removed errorWorkflow is reset to DEFAULT",
-			planJSON:  types.StringValue(`{"executionOrder":"v1"}`),
-			stateJSON: types.StringValue(`{"errorWorkflow":"wf-err","executionOrder":"v1"}`),
-			want:      map[string]any{"errorWorkflow": SETTINGS_RESET_VALUE, "executionOrder": "v1"},
+			name:       "removed errorWorkflow is reset to DEFAULT with the opt-in",
+			planJSON:   types.StringValue(`{"executionOrder":"v1"}`),
+			stateJSON:  types.StringValue(`{"errorWorkflow":"wf-err","executionOrder":"v1"}`),
+			allowReset: true,
+			want:       map[string]any{"errorWorkflow": SETTINGS_RESET_VALUE, "executionOrder": "v1"},
+		},
+		{
+			name:        "removed errorWorkflow without the opt-in fails with a hint",
+			planJSON:    types.StringValue(`{"executionOrder":"v1"}`),
+			stateJSON:   types.StringValue(`{"errorWorkflow":"wf-err","executionOrder":"v1"}`),
+			expectError: "set allow_error_workflow_reset = true",
 		},
 		{
 			name:      "removed callerPolicy and availableInMCP are reset to their defaults",
@@ -1679,7 +1687,7 @@ func Test_resetRemovedWorkflowSettings(t *testing.T) {
 			_, _, settings := parseWorkflowJSON(plan, diags)
 			assert.False(t, diags.HasError())
 
-			resetRemovedWorkflowSettings(&settings, tt.planJSON, tt.stateJSON, diags)
+			resetRemovedWorkflowSettings(&settings, tt.planJSON, tt.stateJSON, resettableSettingKeys(&models.Resource{AllowErrorWorkflowReset: types.BoolValue(tt.allowReset)}), diags)
 
 			// Error cases must not produce a payload.
 			if tt.expectError != "" {
@@ -1837,6 +1845,34 @@ func Test_settingsRestored(t *testing.T) {
 			t.Parallel()
 
 			assert.Equal(t, tt.want, settingsRestored(tt.workflow, tt.sent, []string{settingTimezone}))
+		})
+	}
+}
+
+// Test_errorWorkflowResetHint tests the errorWorkflowResetHint function.
+func Test_errorWorkflowResetHint(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		unsupported []string
+		want        string
+	}{
+		{name: "hint when errorWorkflow is listed", unsupported: []string{"errorWorkflow", "executionOrder"}, want: "set allow_error_workflow_reset = true"},
+		{name: "error case - no hint for other keys", unsupported: []string{"executionOrder"}, want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := errorWorkflowResetHint(tt.unsupported)
+			// Check the hint content.
+			if tt.want == "" {
+				assert.Empty(t, got)
+			} else {
+				assert.Contains(t, got, tt.want)
+			}
 		})
 	}
 }

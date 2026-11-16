@@ -335,7 +335,7 @@ func parseWorkflowUpdateJSON(plan, state *models.Resource, diags *diag.Diagnosti
 		return nodes, connections, settings
 	}
 
-	resetRemovedWorkflowSettings(&settings, plan.SettingsJSON, state.SettingsJSON, diags)
+	resetRemovedWorkflowSettings(&settings, plan.SettingsJSON, state.SettingsJSON, resettableSettingKeys(plan), diags)
 
 	// Return parsed fields.
 	return nodes, connections, settings
@@ -353,8 +353,9 @@ func parseWorkflowUpdateJSON(plan, state *models.Resource, diags *diag.Diagnosti
 //   - settings: Settings parsed from the plan, updated in place
 //   - planSettingsJSON: settings_json value from the plan
 //   - stateSettingsJSON: settings_json value from the current state
+//   - resettable: Keys that may be reset (see resettableSettingKeys)
 //   - diags: Diagnostics for error reporting
-func resetRemovedWorkflowSettings(settings *n8nsdk.WorkflowSettings, planSettingsJSON, stateSettingsJSON types.String, diags *diag.Diagnostics) {
+func resetRemovedWorkflowSettings(settings *n8nsdk.WorkflowSettings, planSettingsJSON, stateSettingsJSON types.String, resettable []string, diags *diag.Diagnostics) {
 	removed, err := removedWorkflowSettingKeys(*settings, planSettingsJSON, stateSettingsJSON)
 	// Check for serialization error.
 	if err != nil {
@@ -366,7 +367,7 @@ func resetRemovedWorkflowSettings(settings *n8nsdk.WorkflowSettings, planSetting
 	// Reset every removed key, keeping the ones the API cannot reset.
 	for _, key := range removed {
 		// Collect keys without a reset value for the error below.
-		if !resetWorkflowSetting(settings, key) {
+		if !slices.Contains(resettable, key) || !resetWorkflowSetting(settings, key) {
 			unsupported = append(unsupported, key)
 		}
 	}
@@ -378,8 +379,8 @@ func resetRemovedWorkflowSettings(settings *n8nsdk.WorkflowSettings, planSetting
 			fmt.Sprintf(
 				"The settings [%s] are stored in n8n but missing from settings_json. "+
 					"The n8n API merges settings on update and cannot reset these keys. "+
-					"Declare them in settings_json or reset them in the n8n UI.",
-				strings.Join(unsupported, ", "),
+					"Declare them in settings_json or reset them in the n8n UI.%s",
+				strings.Join(unsupported, ", "), errorWorkflowResetHint(unsupported),
 			),
 		)
 	}
@@ -425,6 +426,26 @@ func removedWorkflowSettingKeys(settings n8nsdk.WorkflowSettings, planSettingsJS
 
 	// Return sorted keys.
 	return removed, nil
+}
+
+// resettableSettingKeys returns the settings keys the provider may reset for a plan.
+// errorWorkflow is included only with allow_error_workflow_reset, since n8n versions
+// older than 2.5 store "DEFAULT" as a workflow ID and skip the workflow's Error Trigger.
+//
+// Params:
+//   - plan: The planned resource data
+//
+// Returns:
+//   - []string: Keys that may be reset when removed from settings_json
+func resettableSettingKeys(plan *models.Resource) []string {
+	keys := []string{settingTimezone, "callerPolicy", "availableInMCP"}
+	// Opt in to the errorWorkflow reset.
+	if plan.AllowErrorWorkflowReset.ValueBool() {
+		keys = append(keys, settingErrorWorkflow)
+	}
+
+	// Return resettable keys.
+	return keys
 }
 
 // resetWorkflowSetting sets the reset value accepted by the public API for a removed key.
@@ -549,8 +570,32 @@ func declaredSettings(settingsJSON types.String) map[string]any {
 	return declared
 }
 
-// retainedResetSettings returns the keys reset with "DEFAULT" that n8n stored as-is.
+// providerResetKeys returns the keys the provider reset with "DEFAULT" in the update request.
 // Keys declared in settings_json are skipped, since their "DEFAULT" comes from the configuration.
+//
+// Params:
+//   - sent: Settings sent in the update request
+//   - planSettingsJSON: settings_json value from the plan
+//
+// Returns:
+//   - []string: Keys reset by the provider
+func providerResetKeys(sent n8nsdk.WorkflowSettings, planSettingsJSON types.String) []string {
+	declared := declaredSettings(planSettingsJSON)
+	keys := make([]string, 0, len(resetSettingKeys()))
+	// Check every key that may have been reset by the provider.
+	for _, key := range resetSettingKeys() {
+		_, isDeclared := declared[key]
+		// Keep undeclared keys sent as "DEFAULT".
+		if !isDeclared && isSettingsResetValue(*resetSettingField(&sent, key)) {
+			keys = append(keys, key)
+		}
+	}
+
+	// Return reset keys.
+	return keys
+}
+
+// retainedResetSettings returns the keys reset with "DEFAULT" that n8n stored as-is.
 //
 // Params:
 //   - sent: Settings sent in the update request
@@ -560,13 +605,12 @@ func declaredSettings(settingsJSON types.String) map[string]any {
 // Returns:
 //   - []string: Keys n8n kept as "DEFAULT" instead of deleting them
 func retainedResetSettings(sent, returned n8nsdk.WorkflowSettings, planSettingsJSON types.String) []string {
-	declared := declaredSettings(planSettingsJSON)
-	retained := make([]string, 0, len(resetSettingKeys()))
-	// Check every key that may have been reset by the provider.
-	for _, key := range resetSettingKeys() {
-		_, isDeclared := declared[key]
-		// Keep keys reset by the provider that came back unchanged.
-		if !isDeclared && isSettingsResetValue(*resetSettingField(&sent, key)) && isSettingsResetValue(*resetSettingField(&returned, key)) {
+	resets := providerResetKeys(sent, planSettingsJSON)
+	retained := make([]string, 0, len(resets))
+	// Keep reset keys that came back unchanged.
+	for _, key := range resets {
+		// Check the value returned by the API.
+		if isSettingsResetValue(*resetSettingField(&returned, key)) {
 			retained = append(retained, key)
 		}
 	}
@@ -594,6 +638,7 @@ func (r *WorkflowResource) updateWorkflowWithResetCheck(ctx context.Context, wor
 	workflow := r.updateWorkflowViaAPI(ctx, workflowID, request, diags)
 	// Check for API error.
 	if workflow == nil {
+		warnUnverifiedResets(providerResetKeys(request.Settings, plan.SettingsJSON), diags)
 		return nil
 	}
 
@@ -691,6 +736,45 @@ func resetRequirements(keys []string) string {
 
 	// Return joined requirements.
 	return strings.Join(requirements, ", ")
+}
+
+// errorWorkflowResetHint explains how to opt in to the errorWorkflow reset.
+//
+// Params:
+//   - unsupported: Removed keys that cannot be reset
+//
+// Returns:
+//   - string: Hint appended to the diagnostic, empty when errorWorkflow is not listed
+func errorWorkflowResetHint(unsupported []string) string {
+	// Only errorWorkflow can be reset through the opt-in.
+	if !slices.Contains(unsupported, settingErrorWorkflow) {
+		return ""
+	}
+
+	// Return the opt-in hint.
+	return fmt.Sprintf(" To reset errorWorkflow on n8n >= %s, set allow_error_workflow_reset = true.", resetSettingMinVersion(settingErrorWorkflow))
+}
+
+// warnUnverifiedResets warns that resets may have been applied when the update response is missing.
+// n8n may have stored the update before the error, and older versions keep "DEFAULT" as-is.
+//
+// Params:
+//   - keys: Keys reset by the provider in the failed request
+//   - diags: Diagnostics for error reporting
+func warnUnverifiedResets(keys []string, diags *diag.Diagnostics) {
+	// Nothing to verify without provider resets.
+	if len(keys) == 0 {
+		return
+	}
+
+	diags.AddWarning(
+		"Workflow settings reset could not be verified",
+		fmt.Sprintf(
+			"The update request reset [%s] to %q, but no response was received, so the result could not be checked. "+
+				"n8n may have applied the update; older versions store %q as-is (%s). Check these settings in the n8n UI.",
+			strings.Join(keys, ", "), SETTINGS_RESET_VALUE, SETTINGS_RESET_VALUE, resetRequirements(keys),
+		),
+	)
 }
 
 // preserveDeclaredResetValues keeps a "DEFAULT" declared in settings_json when n8n deleted it.
