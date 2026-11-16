@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -528,18 +529,21 @@ func isSettingsResetValue(value *string) bool {
 }
 
 // declaredSettings decodes settings_json into a map of declared keys.
+// Keys set to null are not declared: parsing drops them, so they count as removed.
 //
 // Params:
 //   - settingsJSON: settings_json value from the plan or state
 //
 // Returns:
-//   - map[string]any: Declared settings, empty when the value is null, unknown or invalid
+//   - map[string]any: Declared non-null settings, empty when the value is null, unknown or invalid
 func declaredSettings(settingsJSON types.String) map[string]any {
 	declared := map[string]any{}
 	// Null, unknown or invalid settings_json declares no key.
 	if err := json.Unmarshal([]byte(settingsJSON.ValueString()), &declared); err != nil {
 		return map[string]any{}
 	}
+	// Drop keys set to null.
+	maps.DeleteFunc(declared, func(_ string, value any) bool { return value == nil })
 
 	// Return declared keys.
 	return declared
@@ -606,6 +610,8 @@ func (r *WorkflowResource) updateWorkflowWithResetCheck(ctx context.Context, wor
 }
 
 // restoreRetainedSettings restores the state values of keys n8n kept as "DEFAULT" and reports the error.
+// The restoration is confirmed from the response of the second request; when it cannot be
+// confirmed, the diagnostic asks for a manual fix in the n8n UI.
 //
 // Params:
 //   - ctx: Context for the API call
@@ -616,27 +622,75 @@ func (r *WorkflowResource) updateWorkflowWithResetCheck(ctx context.Context, wor
 //   - diags: Diagnostics for error reporting
 func (r *WorkflowResource) restoreRetainedSettings(ctx context.Context, workflowID string, request n8nsdk.Workflow, retained []string, stateSettingsJSON types.String, diags *diag.Diagnostics) {
 	previous := declaredSettings(stateSettingsJSON)
-	requirements := make([]string, 0, len(retained))
 	// Put back the value stored before the update for each retained key.
 	for _, key := range retained {
 		// Restore only string values recorded in state.
 		if value, ok := previous[key].(string); ok {
 			*resetSettingField(&request.Settings, key) = n8nsdk.PtrString(value)
 		}
-		requirements = append(requirements, fmt.Sprintf("%s requires n8n >= %s", key, resetSettingMinVersion(key)))
 	}
 
-	r.updateWorkflowViaAPI(ctx, workflowID, request, diags)
+	restored := r.updateWorkflowViaAPI(ctx, workflowID, request, diags)
+	outcome := "The previous values were restored."
+	// Report a restoration that the API response does not confirm.
+	if !settingsRestored(restored, request.Settings, retained) {
+		outcome = fmt.Sprintf("Restoring the previous values could not be confirmed, so n8n may still use %q "+
+			"for these settings: set them manually in the n8n UI.", SETTINGS_RESET_VALUE)
+	}
 
 	diags.AddError(
 		"Workflow settings cannot be removed on this n8n version",
 		fmt.Sprintf(
 			"n8n stored [%s] as %q instead of removing them, so this n8n version cannot remove them "+
-				"through the public API (%s). The previous values were restored. "+
-				"Declare them in settings_json or reset them in the n8n UI.",
-			strings.Join(retained, ", "), SETTINGS_RESET_VALUE, strings.Join(requirements, ", "),
+				"through the public API (%s). %s Declare them in settings_json or reset them in the n8n UI.",
+			strings.Join(retained, ", "), SETTINGS_RESET_VALUE, resetRequirements(retained), outcome,
 		),
 	)
+}
+
+// settingsRestored reports whether the API response confirms the restored values.
+//
+// Params:
+//   - workflow: Workflow returned by the restore request, nil when it failed
+//   - sent: Settings sent in the restore request
+//   - keys: Restored keys
+//
+// Returns:
+//   - bool: True when every key came back with the restored value
+func settingsRestored(workflow *n8nsdk.Workflow, sent n8nsdk.WorkflowSettings, keys []string) bool {
+	// A failed request confirms nothing.
+	if workflow == nil {
+		return false
+	}
+	// Compare every restored key with the value sent.
+	for _, key := range keys {
+		want, got := *resetSettingField(&sent, key), *resetSettingField(&workflow.Settings, key)
+		// Fail when the value is still "DEFAULT" or differs from the one sent.
+		if isSettingsResetValue(got) || got == nil || want == nil || *got != *want {
+			return false
+		}
+	}
+
+	// Return confirmed restoration.
+	return true
+}
+
+// resetRequirements describes the minimum n8n version required to remove each key.
+//
+// Params:
+//   - keys: Keys reset with "DEFAULT"
+//
+// Returns:
+//   - string: Comma-separated version requirements
+func resetRequirements(keys []string) string {
+	requirements := make([]string, 0, len(keys))
+	// Describe the requirement of each key.
+	for _, key := range keys {
+		requirements = append(requirements, fmt.Sprintf("%s requires n8n >= %s", key, resetSettingMinVersion(key)))
+	}
+
+	// Return joined requirements.
+	return strings.Join(requirements, ", ")
 }
 
 // preserveDeclaredResetValues keeps a "DEFAULT" declared in settings_json when n8n deleted it.

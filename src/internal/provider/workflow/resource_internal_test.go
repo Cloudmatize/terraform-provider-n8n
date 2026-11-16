@@ -3275,6 +3275,7 @@ func TestWorkflowResource_performUpdateOperations_RemovedSettings(t *testing.T) 
 		stateSettJSON    string
 		responseSettings map[string]any
 		failRestore      bool
+		ignoreRestore    bool
 		expectPuts       int
 		expectSettings   []map[string]any
 		expectError      []string
@@ -3319,7 +3320,32 @@ func TestWorkflowResource_performUpdateOperations_RemovedSettings(t *testing.T) 
 				{"executionOrder": "v1", "timezone": "DEFAULT"},
 				{"executionOrder": "v1", "timezone": "America/Manaus"},
 			},
-			expectError: []string{"timezone requires n8n >= 1.123", "previous values were restored"},
+			expectError: []string{"timezone requires n8n >= 1.123", "The previous values were restored."},
+		},
+		{
+			name:             "error case - errorWorkflow set to null in settings_json is restored",
+			planSettJSON:     `{"executionOrder":"v1","errorWorkflow":null}`,
+			stateSettJSON:    `{"executionOrder":"v1","errorWorkflow":"wf-err"}`,
+			responseSettings: map[string]any{"executionOrder": "v1", "errorWorkflow": "DEFAULT"},
+			expectPuts:       2,
+			expectSettings: []map[string]any{
+				{"executionOrder": "v1", "errorWorkflow": "DEFAULT"},
+				{"executionOrder": "v1", "errorWorkflow": "wf-err"},
+			},
+			expectError: []string{"errorWorkflow requires n8n >= 2.5", "The previous values were restored."},
+		},
+		{
+			name:             "error case - restore ignored by n8n is reported as unconfirmed",
+			planSettJSON:     `{"executionOrder":"v1"}`,
+			stateSettJSON:    `{"executionOrder":"v1","timezone":"America/Manaus"}`,
+			responseSettings: map[string]any{"executionOrder": "v1", "timezone": "DEFAULT"},
+			ignoreRestore:    true,
+			expectPuts:       2,
+			expectSettings: []map[string]any{
+				{"executionOrder": "v1", "timezone": "DEFAULT"},
+				{"executionOrder": "v1", "timezone": "America/Manaus"},
+			},
+			expectError: []string{"could not be confirmed", "set them manually in the n8n UI"},
 		},
 		{
 			name:             "error case - errorWorkflow stored as DEFAULT is restored",
@@ -3344,7 +3370,7 @@ func TestWorkflowResource_performUpdateOperations_RemovedSettings(t *testing.T) 
 				{"executionOrder": "v1", "timezone": "DEFAULT"},
 				{"executionOrder": "v1", "timezone": "America/Manaus"},
 			},
-			expectError: []string{"Could not update workflow", "timezone requires n8n >= 1.123"},
+			expectError: []string{"Could not update workflow", "timezone requires n8n >= 1.123", "could not be confirmed", "set them manually in the n8n UI"},
 		},
 		{
 			name:          "error case - removed executionTimeout fails before the request",
@@ -3377,10 +3403,16 @@ func TestWorkflowResource_performUpdateOperations_RemovedSettings(t *testing.T) 
 				}
 				settings, _ := body["settings"].(map[string]any)
 				sentSettings = append(sentSettings, settings)
+				isRestore := len(sentSettings) > 1
 				// Fail the restore request when requested.
-				if tt.failRestore && len(sentSettings) > 1 {
+				if tt.failRestore && isRestore {
 					w.WriteHeader(http.StatusInternalServerError)
 					return
+				}
+				returned := tt.responseSettings
+				// Like n8n, store and return the restored values unless told to ignore them.
+				if isRestore && !tt.ignoreRestore {
+					returned = settings
 				}
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
@@ -3389,7 +3421,7 @@ func TestWorkflowResource_performUpdateOperations_RemovedSettings(t *testing.T) 
 					"name":        "Test Workflow",
 					"nodes":       []any{},
 					"connections": map[string]any{},
-					"settings":    tt.responseSettings,
+					"settings":    returned,
 				})
 			})
 			n8nClient, server := setupTestClient(t, handler)

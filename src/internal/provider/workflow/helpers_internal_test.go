@@ -1789,6 +1789,13 @@ func Test_retainedResetSettings(t *testing.T) {
 			want:     []string{},
 		},
 		{
+			name:     "key set to null in settings_json is not declared",
+			sent:     n8nsdk.WorkflowSettings{ErrorWorkflow: reset},
+			returned: n8nsdk.WorkflowSettings{ErrorWorkflow: reset},
+			planJSON: types.StringValue(`{"errorWorkflow":null}`),
+			want:     []string{"errorWorkflow"},
+		},
+		{
 			name:     "keys not reset are ignored",
 			sent:     n8nsdk.WorkflowSettings{Timezone: n8nsdk.PtrString("America/Manaus")},
 			returned: n8nsdk.WorkflowSettings{Timezone: reset},
@@ -1802,6 +1809,34 @@ func Test_retainedResetSettings(t *testing.T) {
 			t.Parallel()
 
 			assert.Equal(t, tt.want, retainedResetSettings(tt.sent, tt.returned, tt.planJSON))
+		})
+	}
+}
+
+// Test_settingsRestored tests the settingsRestored function.
+func Test_settingsRestored(t *testing.T) {
+	t.Parallel()
+
+	sent := n8nsdk.WorkflowSettings{Timezone: n8nsdk.PtrString("America/Manaus")}
+	tests := []struct {
+		name     string
+		workflow *n8nsdk.Workflow
+		sent     n8nsdk.WorkflowSettings
+		want     bool
+	}{
+		{name: "restored value confirmed", workflow: &n8nsdk.Workflow{Settings: sent}, sent: sent, want: true},
+		{name: "error case - failed request", workflow: nil, sent: sent, want: false},
+		{name: "error case - value still DEFAULT", workflow: &n8nsdk.Workflow{Settings: n8nsdk.WorkflowSettings{Timezone: n8nsdk.PtrString(SETTINGS_RESET_VALUE)}}, sent: sent, want: false},
+		{name: "error case - value missing", workflow: &n8nsdk.Workflow{}, sent: sent, want: false},
+		{name: "error case - different value", workflow: &n8nsdk.Workflow{Settings: n8nsdk.WorkflowSettings{Timezone: n8nsdk.PtrString("UTC")}}, sent: sent, want: false},
+		{name: "error case - no previous value to restore", workflow: &n8nsdk.Workflow{Settings: n8nsdk.WorkflowSettings{Timezone: n8nsdk.PtrString("UTC")}}, sent: n8nsdk.WorkflowSettings{}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tt.want, settingsRestored(tt.workflow, tt.sent, []string{settingTimezone}))
 		})
 	}
 }
