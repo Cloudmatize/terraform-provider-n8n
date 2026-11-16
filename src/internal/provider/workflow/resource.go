@@ -169,7 +169,7 @@ func (r *WorkflowResource) addJSONAttributes(attrs map[string]schema.Attribute) 
 		Computed:            true,
 	}
 	attrs["settings_json"] = schema.StringAttribute{
-		MarkdownDescription: "Workflow settings as JSON string. Must be valid JSON object. Keys removed from this value are reset in n8n on update (`errorWorkflow`, `timezone`, `callerPolicy`, `availableInMCP`); other keys cannot be removed through the API and must be kept or reset in the n8n UI.",
+		MarkdownDescription: "Workflow settings as JSON string. Must be valid JSON object. Keys removed from this value are reset in n8n on update (`callerPolicy`, `availableInMCP`, `timezone` on n8n >= 1.123, `errorWorkflow` on n8n >= 2.5); on older n8n versions the previous value is restored and the update fails. Other keys cannot be removed through the API and must be kept or reset in the n8n UI.",
 		Optional:            true,
 		Computed:            true,
 	}
@@ -524,10 +524,10 @@ func (r *WorkflowResource) performUpdateOperations(ctx context.Context, workflow
 		return nil
 	}
 
-	// Update workflow content via API.
-	workflow := r.updateWorkflowViaAPI(ctx, workflowID, n8nsdk.Workflow{
+	// Update workflow content via API, restoring resets the n8n version does not support.
+	workflow := r.updateWorkflowWithResetCheck(ctx, workflowID, n8nsdk.Workflow{
 		Name: plan.Name.ValueString(), Nodes: nodes, Connections: connections, Settings: settings,
-	}, diags)
+	}, plan, state, diags)
 	// Check for API error.
 	if diags.HasError() {
 		return nil

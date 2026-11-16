@@ -1569,38 +1569,6 @@ func Test_normalizeWorkflowSettings(t *testing.T) {
 			},
 		},
 		{
-			name: "removes DEFAULT errorWorkflow and timezone stored by older n8n versions",
-			testFunc: func(t *testing.T) {
-				t.Helper()
-				settings := n8nsdk.WorkflowSettings{
-					ErrorWorkflow:  n8nsdk.PtrString(SETTINGS_RESET_VALUE),
-					Timezone:       n8nsdk.PtrString(SETTINGS_RESET_VALUE),
-					ExecutionOrder: n8nsdk.PtrString("v1"),
-				}
-
-				result := normalizeWorkflowSettings(settings)
-
-				assert.Nil(t, result.ErrorWorkflow)
-				assert.Nil(t, result.Timezone)
-				assert.Equal(t, "v1", *result.ExecutionOrder)
-			},
-		},
-		{
-			name: "keeps configured errorWorkflow and timezone values",
-			testFunc: func(t *testing.T) {
-				t.Helper()
-				settings := n8nsdk.WorkflowSettings{
-					ErrorWorkflow: n8nsdk.PtrString("wf-err"),
-					Timezone:      n8nsdk.PtrString("America/Manaus"),
-				}
-
-				result := normalizeWorkflowSettings(settings)
-
-				assert.Equal(t, "wf-err", *result.ErrorWorkflow)
-				assert.Equal(t, "America/Manaus", *result.Timezone)
-			},
-		},
-		{
 			name: "error case - empty string callerPolicy is not removed",
 			testFunc: func(t *testing.T) {
 				t.Helper()
@@ -1730,24 +1698,138 @@ func Test_resetRemovedWorkflowSettings(t *testing.T) {
 	}
 }
 
-// Test_serializeWorkflowJSON_ResetSettings tests that a reset echoed back as "DEFAULT"
-// (n8n versions without server-side cleanup) matches a plan without the key.
-func Test_serializeWorkflowJSON_ResetSettings(t *testing.T) {
+// Test_serializeWorkflowJSON_DeclaredResetValues tests that a "DEFAULT" declared in settings_json
+// survives an update whether n8n deletes it or echoes it back, and that it is never invented.
+func Test_serializeWorkflowJSON_DeclaredResetValues(t *testing.T) {
 	t.Parallel()
 
-	workflow := &n8nsdk.Workflow{
-		Nodes:       []n8nsdk.Node{},
-		Connections: map[string]any{},
-		Settings: n8nsdk.WorkflowSettings{
-			ExecutionOrder: n8nsdk.PtrString("v1"),
-			Timezone:       n8nsdk.PtrString(SETTINGS_RESET_VALUE),
+	tests := []struct {
+		name     string
+		returned n8nsdk.WorkflowSettings
+		planJSON types.String
+		want     string
+	}{
+		{
+			name:     "declared DEFAULT deleted by n8n is kept",
+			returned: n8nsdk.WorkflowSettings{ExecutionOrder: n8nsdk.PtrString("v1")},
+			planJSON: types.StringValue(`{"executionOrder":"v1","timezone":"DEFAULT","errorWorkflow":"DEFAULT"}`),
+			want:     `{"executionOrder":"v1","timezone":"DEFAULT","errorWorkflow":"DEFAULT"}`,
+		},
+		{
+			name:     "declared DEFAULT echoed back is kept",
+			returned: n8nsdk.WorkflowSettings{ExecutionOrder: n8nsdk.PtrString("v1"), Timezone: n8nsdk.PtrString("DEFAULT")},
+			planJSON: types.StringValue(`{"executionOrder":"v1","timezone":"DEFAULT"}`),
+			want:     `{"executionOrder":"v1","timezone":"DEFAULT"}`,
+		},
+		{
+			name:     "undeclared DEFAULT returned by n8n is not hidden",
+			returned: n8nsdk.WorkflowSettings{Timezone: n8nsdk.PtrString("DEFAULT")},
+			planJSON: types.StringValue(`{}`),
+			want:     `{"timezone":"DEFAULT"}`,
+		},
+		{
+			name:     "declared value other than DEFAULT is not invented",
+			returned: n8nsdk.WorkflowSettings{},
+			planJSON: types.StringValue(`{"timezone":"America/Manaus"}`),
+			want:     `{}`,
+		},
+		{
+			name:     "null settings_json declares nothing",
+			returned: n8nsdk.WorkflowSettings{},
+			planJSON: types.StringNull(),
+			want:     `{}`,
 		},
 	}
-	plan := &models.Resource{SettingsJSON: types.StringValue(`{"executionOrder":"v1"}`)}
 
-	serializeWorkflowJSON(workflow, plan)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	assert.JSONEq(t, `{"executionOrder":"v1"}`, plan.SettingsJSON.ValueString())
+			workflow := &n8nsdk.Workflow{Nodes: []n8nsdk.Node{}, Connections: map[string]any{}, Settings: tt.returned}
+			plan := &models.Resource{SettingsJSON: tt.planJSON}
+
+			serializeWorkflowJSON(workflow, plan)
+
+			assert.JSONEq(t, tt.want, plan.SettingsJSON.ValueString())
+		})
+	}
+}
+
+// Test_retainedResetSettings tests the retainedResetSettings function.
+func Test_retainedResetSettings(t *testing.T) {
+	t.Parallel()
+
+	reset := n8nsdk.PtrString(SETTINGS_RESET_VALUE)
+	tests := []struct {
+		name     string
+		sent     n8nsdk.WorkflowSettings
+		returned n8nsdk.WorkflowSettings
+		planJSON types.String
+		want     []string
+	}{
+		{
+			name:     "reset keys echoed back are retained",
+			sent:     n8nsdk.WorkflowSettings{ErrorWorkflow: reset, Timezone: reset},
+			returned: n8nsdk.WorkflowSettings{ErrorWorkflow: reset, Timezone: reset},
+			planJSON: types.StringValue(`{}`),
+			want:     []string{"errorWorkflow", "timezone"},
+		},
+		{
+			name:     "reset keys deleted by n8n are not retained",
+			sent:     n8nsdk.WorkflowSettings{ErrorWorkflow: reset, Timezone: reset},
+			returned: n8nsdk.WorkflowSettings{},
+			planJSON: types.StringValue(`{}`),
+			want:     []string{},
+		},
+		{
+			name:     "declared DEFAULT is not a provider reset",
+			sent:     n8nsdk.WorkflowSettings{Timezone: reset},
+			returned: n8nsdk.WorkflowSettings{Timezone: reset},
+			planJSON: types.StringValue(`{"timezone":"DEFAULT"}`),
+			want:     []string{},
+		},
+		{
+			name:     "keys not reset are ignored",
+			sent:     n8nsdk.WorkflowSettings{Timezone: n8nsdk.PtrString("America/Manaus")},
+			returned: n8nsdk.WorkflowSettings{Timezone: reset},
+			planJSON: types.StringValue(`{}`),
+			want:     []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tt.want, retainedResetSettings(tt.sent, tt.returned, tt.planJSON))
+		})
+	}
+}
+
+// Test_resetSettingHelpers tests the key mapping helpers of reset settings.
+func Test_resetSettingHelpers(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		key        string
+		minVersion string
+		hasField   bool
+	}{
+		{name: "errorWorkflow", key: "errorWorkflow", minVersion: "2.5", hasField: true},
+		{name: "timezone", key: "timezone", minVersion: "1.123", hasField: true},
+		{name: "error case - key not reset with DEFAULT", key: "executionOrder", minVersion: "", hasField: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			settings := n8nsdk.WorkflowSettings{}
+			assert.Equal(t, tt.minVersion, resetSettingMinVersion(tt.key))
+			assert.Equal(t, tt.hasField, resetSettingField(&settings, tt.key) != nil)
+		})
+	}
 }
 
 // Test_mapWorkflowProjectID tests the mapWorkflowProjectID function.

@@ -13,3 +13,10 @@ const (
 	descName   = "Workflow name"
 	descActive = "Whether the workflow is active"
 )
+
+// Workflow settings keys that are reset by sending "DEFAULT" when they are
+// removed from settings_json. They are the wire-level keys of the n8n API.
+const (
+	settingErrorWorkflow = "errorWorkflow"
+	settingTimezone      = "timezone"
+)

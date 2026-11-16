@@ -3264,39 +3264,94 @@ func TestWorkflowResource_performUpdateOperations(t *testing.T) {
 }
 
 // TestWorkflowResource_performUpdateOperations_RemovedSettings tests that settings removed
-// from settings_json are reset in the update request, and that keys the API cannot reset
-// fail before any request is sent.
+// from settings_json are reset in the update request, that resets stored as-is by older n8n
+// versions are reverted, and that keys the API cannot reset fail before any request is sent.
 func TestWorkflowResource_performUpdateOperations_RemovedSettings(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name           string
-		planSettJSON   string
-		stateSettJSON  string
-		expectRequest  bool
-		expectSettings map[string]any
-		expectError    bool
+		name             string
+		planSettJSON     string
+		stateSettJSON    string
+		responseSettings map[string]any
+		failRestore      bool
+		expectPuts       int
+		expectSettings   []map[string]any
+		expectError      []string
 	}{
 		{
-			name:           "success case - removed timezone is sent as DEFAULT",
-			planSettJSON:   `{"errorWorkflow":"wf-err","executionOrder":"v1"}`,
-			stateSettJSON:  `{"errorWorkflow":"wf-err","executionOrder":"v1","timezone":"America/Manaus"}`,
-			expectRequest:  true,
-			expectSettings: map[string]any{"errorWorkflow": "wf-err", "executionOrder": "v1", "timezone": "DEFAULT"},
+			name:             "success case - removed timezone deleted by n8n",
+			planSettJSON:     `{"errorWorkflow":"wf-err","executionOrder":"v1"}`,
+			stateSettJSON:    `{"errorWorkflow":"wf-err","executionOrder":"v1","timezone":"America/Manaus"}`,
+			responseSettings: map[string]any{"errorWorkflow": "wf-err", "executionOrder": "v1"},
+			expectPuts:       1,
+			expectSettings: []map[string]any{
+				{"errorWorkflow": "wf-err", "executionOrder": "v1", "timezone": "DEFAULT"},
+			},
 		},
 		{
-			name:           "success case - unchanged settings are sent as declared",
-			planSettJSON:   `{"errorWorkflow":"wf-err","executionOrder":"v1"}`,
-			stateSettJSON:  `{"errorWorkflow":"wf-err","executionOrder":"v1"}`,
-			expectRequest:  true,
-			expectSettings: map[string]any{"errorWorkflow": "wf-err", "executionOrder": "v1"},
+			name:             "success case - unchanged settings are sent as declared",
+			planSettJSON:     `{"errorWorkflow":"wf-err","executionOrder":"v1"}`,
+			stateSettJSON:    `{"errorWorkflow":"wf-err","executionOrder":"v1"}`,
+			responseSettings: map[string]any{"errorWorkflow": "wf-err", "executionOrder": "v1"},
+			expectPuts:       1,
+			expectSettings: []map[string]any{
+				{"errorWorkflow": "wf-err", "executionOrder": "v1"},
+			},
+		},
+		{
+			name:             "success case - declared DEFAULT echoed back is not reverted",
+			planSettJSON:     `{"executionOrder":"v1","timezone":"DEFAULT"}`,
+			stateSettJSON:    `{"executionOrder":"v1","timezone":"DEFAULT"}`,
+			responseSettings: map[string]any{"executionOrder": "v1", "timezone": "DEFAULT"},
+			expectPuts:       1,
+			expectSettings: []map[string]any{
+				{"executionOrder": "v1", "timezone": "DEFAULT"},
+			},
+		},
+		{
+			name:             "error case - timezone stored as DEFAULT is restored",
+			planSettJSON:     `{"executionOrder":"v1"}`,
+			stateSettJSON:    `{"executionOrder":"v1","timezone":"America/Manaus"}`,
+			responseSettings: map[string]any{"executionOrder": "v1", "timezone": "DEFAULT"},
+			expectPuts:       2,
+			expectSettings: []map[string]any{
+				{"executionOrder": "v1", "timezone": "DEFAULT"},
+				{"executionOrder": "v1", "timezone": "America/Manaus"},
+			},
+			expectError: []string{"timezone requires n8n >= 1.123", "previous values were restored"},
+		},
+		{
+			name:             "error case - errorWorkflow stored as DEFAULT is restored",
+			planSettJSON:     `{"executionOrder":"v1"}`,
+			stateSettJSON:    `{"executionOrder":"v1","errorWorkflow":"wf-err"}`,
+			responseSettings: map[string]any{"executionOrder": "v1", "errorWorkflow": "DEFAULT"},
+			expectPuts:       2,
+			expectSettings: []map[string]any{
+				{"executionOrder": "v1", "errorWorkflow": "DEFAULT"},
+				{"executionOrder": "v1", "errorWorkflow": "wf-err"},
+			},
+			expectError: []string{"errorWorkflow requires n8n >= 2.5"},
+		},
+		{
+			name:             "error case - failed restore is reported with the version requirement",
+			planSettJSON:     `{"executionOrder":"v1"}`,
+			stateSettJSON:    `{"executionOrder":"v1","timezone":"America/Manaus"}`,
+			responseSettings: map[string]any{"executionOrder": "v1", "timezone": "DEFAULT"},
+			failRestore:      true,
+			expectPuts:       2,
+			expectSettings: []map[string]any{
+				{"executionOrder": "v1", "timezone": "DEFAULT"},
+				{"executionOrder": "v1", "timezone": "America/Manaus"},
+			},
+			expectError: []string{"Could not update workflow", "timezone requires n8n >= 1.123"},
 		},
 		{
 			name:          "error case - removed executionTimeout fails before the request",
 			planSettJSON:  `{"executionOrder":"v1"}`,
 			stateSettJSON: `{"executionOrder":"v1","executionTimeout":3600}`,
-			expectRequest: false,
-			expectError:   true,
+			expectPuts:    0,
+			expectError:   []string{"executionTimeout"},
 		},
 	}
 
@@ -3305,33 +3360,37 @@ func TestWorkflowResource_performUpdateOperations_RemovedSettings(t *testing.T) 
 			t.Parallel()
 
 			var mu sync.Mutex
-			var sentSettings map[string]any
-			requests := 0
+			sentSettings := []map[string]any{}
 			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				mu.Lock()
 				defer mu.Unlock()
-				requests++
-				// Capture the settings sent to PUT /workflows/{id}.
-				if r.Method == http.MethodPut && r.URL.Path == "/workflows/wf-123" {
-					var body map[string]any
-					// Reject request bodies that are not valid JSON.
-					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-						w.WriteHeader(http.StatusBadRequest)
-						return
-					}
-					sentSettings, _ = body["settings"].(map[string]any)
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(http.StatusOK)
-					json.NewEncoder(w).Encode(map[string]any{
-						"id":          "wf-123",
-						"name":        "Test Workflow",
-						"nodes":       []any{},
-						"connections": map[string]any{},
-						"settings":    map[string]any{"errorWorkflow": "wf-err", "executionOrder": "v1"},
-					})
+				// Only PUT /workflows/{id} is expected.
+				if r.Method != http.MethodPut || r.URL.Path != "/workflows/wf-123" {
+					w.WriteHeader(http.StatusNotFound)
 					return
 				}
-				w.WriteHeader(http.StatusNotFound)
+				var body map[string]any
+				// Reject request bodies that are not valid JSON.
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				settings, _ := body["settings"].(map[string]any)
+				sentSettings = append(sentSettings, settings)
+				// Fail the restore request when requested.
+				if tt.failRestore && len(sentSettings) > 1 {
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				json.NewEncoder(w).Encode(map[string]any{
+					"id":          "wf-123",
+					"name":        "Test Workflow",
+					"nodes":       []any{},
+					"connections": map[string]any{},
+					"settings":    tt.responseSettings,
+				})
 			})
 			n8nClient, server := setupTestClient(t, handler)
 			defer server.Close()
@@ -3359,15 +3418,28 @@ func TestWorkflowResource_performUpdateOperations_RemovedSettings(t *testing.T) 
 
 			mu.Lock()
 			defer mu.Unlock()
-			assert.Equal(t, tt.expectError, diags.HasError())
-			// Without a request the update must stop before reaching the API.
-			if !tt.expectRequest {
+			assert.Len(t, sentSettings, tt.expectPuts)
+			// Error cases keep the previous state.
+			if len(tt.expectError) > 0 {
 				assert.Nil(t, result)
-				assert.Zero(t, requests)
-				return
+				assert.True(t, diags.HasError())
+				details := ""
+				// Collect every error detail.
+				for _, d := range diags.Errors() {
+					details += d.Detail() + "\n"
+				}
+				// Check each expected fragment.
+				for _, fragment := range tt.expectError {
+					assert.Contains(t, details, fragment)
+				}
+			} else {
+				assert.NotNil(t, result)
+				assert.False(t, diags.HasError())
 			}
-			assert.NotNil(t, result)
-			assert.Equal(t, tt.expectSettings, sentSettings)
+			// Compare the settings of each request.
+			if tt.expectSettings != nil {
+				assert.Equal(t, tt.expectSettings, sentSettings)
+			}
 		})
 	}
 }

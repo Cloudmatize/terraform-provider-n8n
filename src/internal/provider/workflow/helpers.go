@@ -24,7 +24,8 @@ import (
 const CALLER_POLICY_DEFAULT string = "workflowsFromSameOwner"
 
 // SETTINGS_RESET_VALUE is the value n8n treats as "use the instance default" for a setting.
-// n8n 2.x deletes it from stored settings on update; older versions store it as-is.
+// Recent n8n versions delete it from stored settings on update; older versions store it
+// as-is, which updateWorkflowWithResetCheck detects and reverts.
 const SETTINGS_RESET_VALUE string = "DEFAULT"
 
 // parseWorkflowJSON parses the JSON fields from a workflow model.
@@ -279,6 +280,8 @@ func serializeWorkflowJSON(workflow *n8nsdk.Workflow, plan *models.Resource) {
 	}
 	// Normalize settings before serialization to avoid unnecessary diffs.
 	normalizedSettings := normalizeWorkflowSettings(workflow.Settings)
+	// Keep a "DEFAULT" declared in settings_json that n8n deleted on update.
+	preserveDeclaredResetValues(&normalizedSettings, plan.SettingsJSON)
 	// Check for error.
 	if settingsJSON, err := json.Marshal(normalizedSettings); err == nil {
 		plan.SettingsJSON = types.StringValue(string(settingsJSON))
@@ -287,9 +290,7 @@ func serializeWorkflowJSON(workflow *n8nsdk.Workflow, plan *models.Resource) {
 
 // normalizeWorkflowSettings removes default values from settings.
 // The n8n API returns default values for certain settings even when not explicitly set.
-// This function removes callerPolicy and availableInMCP defaults to match user config,
-// and the "DEFAULT" value of errorWorkflow and timezone, which n8n versions without
-// server-side cleanup store as-is after a reset.
+// This function removes callerPolicy and availableInMCP defaults to match user config.
 //
 // Params:
 //   - settings: Original workflow settings from API
@@ -310,30 +311,8 @@ func normalizeWorkflowSettings(settings n8nsdk.WorkflowSettings) n8nsdk.Workflow
 		normalized.AvailableInMCP = nil
 	}
 
-	// Remove settings reset to the instance default.
-	normalized.ErrorWorkflow = clearSettingsResetValue(normalized.ErrorWorkflow)
-	normalized.Timezone = clearSettingsResetValue(normalized.Timezone)
-
 	// Return result.
 	return normalized
-}
-
-// clearSettingsResetValue returns nil when a setting holds the "DEFAULT" reset value.
-// n8n treats "DEFAULT" as unset, so it is equivalent to the key being absent.
-//
-// Params:
-//   - value: Setting value returned by the API
-//
-// Returns:
-//   - *string: nil for "DEFAULT", the original value otherwise
-func clearSettingsResetValue(value *string) *string {
-	// Treat the reset value as an absent setting.
-	if value != nil && *value == SETTINGS_RESET_VALUE {
-		return nil
-	}
-
-	// Return original value.
-	return value
 }
 
 // parseWorkflowUpdateJSON parses the plan JSON fields for an update request.
@@ -458,9 +437,9 @@ func removedWorkflowSettingKeys(settings n8nsdk.WorkflowSettings, planSettingsJS
 func resetWorkflowSetting(settings *n8nsdk.WorkflowSettings, key string) bool {
 	// Pick the value n8n deletes or normalization removes for this key.
 	switch key {
-	case "errorWorkflow":
+	case settingErrorWorkflow:
 		settings.SetErrorWorkflow(SETTINGS_RESET_VALUE)
-	case "timezone":
+	case settingTimezone:
 		settings.SetTimezone(SETTINGS_RESET_VALUE)
 	case "callerPolicy":
 		settings.SetCallerPolicy(CALLER_POLICY_DEFAULT)
@@ -485,6 +464,198 @@ func resetWorkflowSetting(settings *n8nsdk.WorkflowSettings, key string) bool {
 func isKnownString(value types.String) bool {
 	// Return known state.
 	return !value.IsNull() && !value.IsUnknown()
+}
+
+// resetSettingKeys returns the settings keys that are reset by sending SETTINGS_RESET_VALUE.
+//
+// Returns:
+//   - []string: Settings keys reset with "DEFAULT"
+func resetSettingKeys() []string {
+	// Return keys reset with "DEFAULT".
+	return []string{settingErrorWorkflow, settingTimezone}
+}
+
+// resetSettingMinVersion returns the first n8n version that deletes "DEFAULT" for a key
+// when the workflow is updated through the public API.
+//
+// Params:
+//   - key: Settings key reset with "DEFAULT"
+//
+// Returns:
+//   - string: Minimum n8n version, empty for unknown keys
+func resetSettingMinVersion(key string) string {
+	// Pick the version that added server-side cleanup for this key.
+	switch key {
+	case settingErrorWorkflow:
+		return "2.5"
+	case settingTimezone:
+		return "1.123"
+	default:
+		return ""
+	}
+}
+
+// resetSettingField returns the settings field of a key reset with "DEFAULT".
+//
+// Params:
+//   - settings: Workflow settings
+//   - key: Settings key reset with "DEFAULT"
+//
+// Returns:
+//   - **string: Address of the field, nil for keys not reset with "DEFAULT"
+func resetSettingField(settings *n8nsdk.WorkflowSettings, key string) **string {
+	// Map the key to its struct field.
+	switch key {
+	case settingErrorWorkflow:
+		return &settings.ErrorWorkflow
+	case settingTimezone:
+		return &settings.Timezone
+	default:
+		return nil
+	}
+}
+
+// isSettingsResetValue reports whether a setting value is SETTINGS_RESET_VALUE.
+//
+// Params:
+//   - value: Setting value
+//
+// Returns:
+//   - bool: True when the value is "DEFAULT"
+func isSettingsResetValue(value *string) bool {
+	// Return reset state.
+	return value != nil && *value == SETTINGS_RESET_VALUE
+}
+
+// declaredSettings decodes settings_json into a map of declared keys.
+//
+// Params:
+//   - settingsJSON: settings_json value from the plan or state
+//
+// Returns:
+//   - map[string]any: Declared settings, empty when the value is null, unknown or invalid
+func declaredSettings(settingsJSON types.String) map[string]any {
+	declared := map[string]any{}
+	// Null, unknown or invalid settings_json declares no key.
+	if err := json.Unmarshal([]byte(settingsJSON.ValueString()), &declared); err != nil {
+		return map[string]any{}
+	}
+
+	// Return declared keys.
+	return declared
+}
+
+// retainedResetSettings returns the keys reset with "DEFAULT" that n8n stored as-is.
+// Keys declared in settings_json are skipped, since their "DEFAULT" comes from the configuration.
+//
+// Params:
+//   - sent: Settings sent in the update request
+//   - returned: Settings returned by the API after the update
+//   - planSettingsJSON: settings_json value from the plan
+//
+// Returns:
+//   - []string: Keys n8n kept as "DEFAULT" instead of deleting them
+func retainedResetSettings(sent, returned n8nsdk.WorkflowSettings, planSettingsJSON types.String) []string {
+	declared := declaredSettings(planSettingsJSON)
+	retained := make([]string, 0, len(resetSettingKeys()))
+	// Check every key that may have been reset by the provider.
+	for _, key := range resetSettingKeys() {
+		_, isDeclared := declared[key]
+		// Keep keys reset by the provider that came back unchanged.
+		if !isDeclared && isSettingsResetValue(*resetSettingField(&sent, key)) && isSettingsResetValue(*resetSettingField(&returned, key)) {
+			retained = append(retained, key)
+		}
+	}
+
+	// Return retained keys.
+	return retained
+}
+
+// updateWorkflowWithResetCheck updates the workflow and reverts resets the n8n version stored as-is.
+// n8n versions without server-side cleanup keep "DEFAULT" literally, which breaks the timezone
+// and the error workflow at runtime. In that case the previous values are restored with a second
+// request and an error explains the minimum n8n version required for the removal.
+//
+// Params:
+//   - ctx: Context for the API calls
+//   - workflowID: The ID of the workflow to update
+//   - request: The workflow updates to apply
+//   - plan: The planned resource data
+//   - state: The current resource state
+//   - diags: Diagnostics for error reporting
+//
+// Returns:
+//   - *n8nsdk.Workflow: Updated workflow, nil on error or when a reset was reverted
+func (r *WorkflowResource) updateWorkflowWithResetCheck(ctx context.Context, workflowID string, request n8nsdk.Workflow, plan, state *models.Resource, diags *diag.Diagnostics) *n8nsdk.Workflow {
+	workflow := r.updateWorkflowViaAPI(ctx, workflowID, request, diags)
+	// Check for API error.
+	if workflow == nil {
+		return nil
+	}
+
+	retained := retainedResetSettings(request.Settings, workflow.Settings, plan.SettingsJSON)
+	// Nothing to revert when n8n deleted every reset key.
+	if len(retained) == 0 {
+		return workflow
+	}
+
+	r.restoreRetainedSettings(ctx, workflowID, request, retained, state.SettingsJSON, diags)
+
+	// Return nil so the previous state is kept.
+	return nil
+}
+
+// restoreRetainedSettings restores the state values of keys n8n kept as "DEFAULT" and reports the error.
+//
+// Params:
+//   - ctx: Context for the API call
+//   - workflowID: The ID of the workflow to update
+//   - request: The workflow update that was applied
+//   - retained: Keys n8n kept as "DEFAULT"
+//   - stateSettingsJSON: settings_json value from the current state
+//   - diags: Diagnostics for error reporting
+func (r *WorkflowResource) restoreRetainedSettings(ctx context.Context, workflowID string, request n8nsdk.Workflow, retained []string, stateSettingsJSON types.String, diags *diag.Diagnostics) {
+	previous := declaredSettings(stateSettingsJSON)
+	requirements := make([]string, 0, len(retained))
+	// Put back the value stored before the update for each retained key.
+	for _, key := range retained {
+		// Restore only string values recorded in state.
+		if value, ok := previous[key].(string); ok {
+			*resetSettingField(&request.Settings, key) = n8nsdk.PtrString(value)
+		}
+		requirements = append(requirements, fmt.Sprintf("%s requires n8n >= %s", key, resetSettingMinVersion(key)))
+	}
+
+	r.updateWorkflowViaAPI(ctx, workflowID, request, diags)
+
+	diags.AddError(
+		"Workflow settings cannot be removed on this n8n version",
+		fmt.Sprintf(
+			"n8n stored [%s] as %q instead of removing them, so this n8n version cannot remove them "+
+				"through the public API (%s). The previous values were restored. "+
+				"Declare them in settings_json or reset them in the n8n UI.",
+			strings.Join(retained, ", "), SETTINGS_RESET_VALUE, strings.Join(requirements, ", "),
+		),
+	)
+}
+
+// preserveDeclaredResetValues keeps a "DEFAULT" declared in settings_json when n8n deleted it.
+// n8n treats "DEFAULT" as an absent key, so both representations are equivalent; keeping the
+// declared one makes the state match the configuration.
+//
+// Params:
+//   - settings: Normalized settings written to state, updated in place
+//   - configuredJSON: settings_json value from the plan or prior state
+func preserveDeclaredResetValues(settings *n8nsdk.WorkflowSettings, configuredJSON types.String) {
+	declared := declaredSettings(configuredJSON)
+	// Check every key that accepts "DEFAULT".
+	for _, key := range resetSettingKeys() {
+		field := resetSettingField(settings, key)
+		// Restore the declared value only when n8n omitted the key.
+		if declared[key] == SETTINGS_RESET_VALUE && *field == nil {
+			*field = n8nsdk.PtrString(SETTINGS_RESET_VALUE)
+		}
+	}
 }
 
 // convertTagIDsToTagIdsInner converts string tag IDs to SDK TagIdsInner format.
