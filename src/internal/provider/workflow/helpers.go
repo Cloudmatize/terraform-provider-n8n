@@ -284,9 +284,66 @@ func serializeWorkflowJSON(workflow *n8nsdk.Workflow, plan *models.Resource) {
 	// Keep a "DEFAULT" declared in settings_json that n8n deleted on update.
 	preserveDeclaredResetValues(&normalizedSettings, plan.SettingsJSON)
 	// Check for error.
-	if settingsJSON, err := json.Marshal(normalizedSettings); err == nil {
+	if settingsJSON, err := marshalSettingsWithDeclaredNulls(normalizedSettings, plan.SettingsJSON); err == nil {
 		plan.SettingsJSON = types.StringValue(string(settingsJSON))
 	}
+}
+
+// marshalSettingsWithDeclaredNulls serializes settings and keeps the keys that settings_json
+// declares as null when n8n no longer returns them. settings_json is a plain string, so a
+// removed key written as null must stay in state for the value to match the configuration.
+// A key declared as null that n8n still returns is serialized with its value.
+//
+// Params:
+//   - settings: Normalized settings returned by the API
+//   - configuredJSON: settings_json value from the plan or prior state
+//
+// Returns:
+//   - []byte: Serialized settings
+//   - error: Serialization error
+func marshalSettingsWithDeclaredNulls(settings n8nsdk.WorkflowSettings, configuredJSON types.String) ([]byte, error) {
+	serialized, err := settings.ToMap()
+	// Check for serialization error.
+	if err != nil {
+		return nil, err
+	}
+	// Keep each null marker for a key n8n did not return.
+	for _, key := range declaredNullSettingKeys(configuredJSON) {
+		// Skip keys n8n still returns.
+		if _, returned := serialized[key]; !returned {
+			serialized[key] = nil
+		}
+	}
+
+	// Return serialized settings.
+	return json.Marshal(serialized)
+}
+
+// declaredNullSettingKeys returns the keys that settings_json declares as null.
+//
+// Params:
+//   - configuredJSON: settings_json value from the plan or prior state
+//
+// Returns:
+//   - []string: Keys set to null, empty when the value is null, unknown or invalid
+func declaredNullSettingKeys(configuredJSON types.String) []string {
+	var configured map[string]any
+	// Null, unknown or invalid settings_json declares no key.
+	if err := json.Unmarshal([]byte(configuredJSON.ValueString()), &configured); err != nil {
+		return nil
+	}
+
+	keys := make([]string, 0, len(configured))
+	// Collect keys whose value is null.
+	for key, value := range configured {
+		// Keep only null values.
+		if value == nil {
+			keys = append(keys, key)
+		}
+	}
+
+	// Return null keys.
+	return keys
 }
 
 // normalizeWorkflowSettings removes default values from settings.
@@ -416,9 +473,9 @@ func removedWorkflowSettingKeys(settings n8nsdk.WorkflowSettings, planSettingsJS
 
 	removed := make([]string, 0, len(stateSettings))
 	// Collect every key stored in state that the plan no longer declares.
-	for key := range stateSettings {
-		// Keep only keys missing from the plan.
-		if _, declared := planSettings[key]; !declared {
+	for key, value := range stateSettings {
+		// Keep only keys with a stored value that are missing from the plan; null means absent.
+		if _, declared := planSettings[key]; !declared && value != nil {
 			removed = append(removed, key)
 		}
 	}

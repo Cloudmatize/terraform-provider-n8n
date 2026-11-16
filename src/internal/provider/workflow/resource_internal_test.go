@@ -2853,6 +2853,96 @@ func TestWorkflowResource_executeUpdateLogic(t *testing.T) {
 	}
 }
 
+// TestWorkflowResource_executeUpdateLogic_NullSettingRemoval tests a key removed with null in
+// settings_json through the whole update: the reset request, the response and the state written.
+func TestWorkflowResource_executeUpdateLogic_NullSettingRemoval(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		responseSettings map[string]any
+		expectState      string
+	}{
+		{
+			name:             "success case - n8n removes the key and state keeps the null marker",
+			responseSettings: map[string]any{"executionOrder": "v1"},
+			expectState:      `{"executionOrder":"v1","timezone":null}`,
+		},
+		{
+			name:             "error case - n8n keeps the value and state reports it",
+			responseSettings: map[string]any{"executionOrder": "v1", "timezone": "America/Manaus"},
+			expectState:      `{"executionOrder":"v1","timezone":"America/Manaus"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var mu sync.Mutex
+			sentSettings := []map[string]any{}
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				defer mu.Unlock()
+				// Only PUT /workflows/{id} is expected.
+				if r.Method != http.MethodPut || r.URL.Path != "/workflows/wf-123" {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				var body map[string]any
+				// Reject request bodies that are not valid JSON.
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				settings, _ := body["settings"].(map[string]any)
+				sentSettings = append(sentSettings, settings)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				json.NewEncoder(w).Encode(map[string]any{
+					"id":          "wf-123",
+					"name":        "Test Workflow",
+					"nodes":       []any{},
+					"connections": map[string]any{},
+					"settings":    tt.responseSettings,
+				})
+			})
+			n8nClient, server := setupTestClient(t, handler)
+			defer server.Close()
+
+			planned := `{"executionOrder":"v1","timezone":null}`
+			r := &WorkflowResource{client: n8nClient}
+			plan := &models.Resource{
+				Name:            types.StringValue("Test Workflow"),
+				NodesJSON:       types.StringValue(`[]`),
+				ConnectionsJSON: types.StringValue(`{}`),
+				SettingsJSON:    types.StringValue(planned),
+				Active:          types.BoolValue(false),
+				ProjectID:       types.StringValue("proj-1"),
+				Tags:            types.SetNull(types.StringType),
+			}
+			state := &models.Resource{
+				ID:           types.StringValue("wf-123"),
+				Active:       types.BoolValue(false),
+				ProjectID:    types.StringValue("proj-1"),
+				SettingsJSON: types.StringValue(`{"executionOrder":"v1","timezone":"America/Manaus"}`),
+			}
+			resp := &resource.UpdateResponse{}
+
+			ok := r.executeUpdateLogic(context.Background(), plan, state, resp)
+
+			mu.Lock()
+			defer mu.Unlock()
+			assert.True(t, ok)
+			assert.False(t, resp.Diagnostics.HasError())
+			assert.Equal(t, []map[string]any{{"executionOrder": "v1", "timezone": "DEFAULT"}}, sentSettings)
+			assert.Equal(t, tt.expectState, plan.SettingsJSON.ValueString())
+			// Terraform accepts the apply only when state equals the planned string.
+			assert.Equal(t, tt.expectState == planned, plan.SettingsJSON.ValueString() == planned)
+		})
+	}
+}
+
 // TestWorkflowResource_executeDeleteLogic tests the executeDeleteLogic method with error cases.
 func TestWorkflowResource_executeDeleteLogic(t *testing.T) {
 	t.Parallel()

@@ -1637,6 +1637,12 @@ func Test_resetRemovedWorkflowSettings(t *testing.T) {
 			want:      map[string]any{"executionOrder": "v1", "callerPolicy": CALLER_POLICY_DEFAULT, "availableInMCP": false},
 		},
 		{
+			name:      "null in state is not a removal",
+			planJSON:  types.StringValue(`{"executionOrder":"v1"}`),
+			stateJSON: types.StringValue(`{"executionOrder":"v1","timezone":null}`),
+			want:      map[string]any{"executionOrder": "v1"},
+		},
+		{
 			name:      "keys added in the plan are left untouched",
 			planJSON:  types.StringValue(`{"executionOrder":"v1","timezone":"America/Sao_Paulo"}`),
 			stateJSON: types.StringValue(`{"executionOrder":"v1"}`),
@@ -1759,6 +1765,64 @@ func Test_serializeWorkflowJSON_DeclaredResetValues(t *testing.T) {
 			serializeWorkflowJSON(workflow, plan)
 
 			assert.JSONEq(t, tt.want, plan.SettingsJSON.ValueString())
+		})
+	}
+}
+
+// Test_serializeWorkflowJSON_DeclaredNulls tests that a key declared as null in settings_json
+// stays null in state when n8n no longer returns it, so state matches the configured string.
+func Test_serializeWorkflowJSON_DeclaredNulls(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		returned n8nsdk.WorkflowSettings
+		planJSON types.String
+		want     string
+	}{
+		{
+			name:     "null declared for a key n8n removed is kept",
+			returned: n8nsdk.WorkflowSettings{ExecutionOrder: n8nsdk.PtrString("v1")},
+			planJSON: types.StringValue(`{"executionOrder":"v1","timezone":null}`),
+			want:     `{"executionOrder":"v1","timezone":null}`,
+		},
+		{
+			name:     "null declared for a key n8n still returns is not masked",
+			returned: n8nsdk.WorkflowSettings{ExecutionOrder: n8nsdk.PtrString("v1"), Timezone: n8nsdk.PtrString("America/Manaus")},
+			planJSON: types.StringValue(`{"executionOrder":"v1","timezone":null}`),
+			want:     `{"executionOrder":"v1","timezone":"America/Manaus"}`,
+		},
+		{
+			name:     "settings without null keep the previous output",
+			returned: n8nsdk.WorkflowSettings{ExecutionOrder: n8nsdk.PtrString("v1"), Timezone: n8nsdk.PtrString("UTC")},
+			planJSON: types.StringValue(`{"executionOrder":"v1","timezone":"UTC"}`),
+			want:     `{"executionOrder":"v1","timezone":"UTC"}`,
+		},
+		{
+			name:     "null kept in prior state survives a refresh",
+			returned: n8nsdk.WorkflowSettings{},
+			planJSON: types.StringValue(`{"errorWorkflow":null}`),
+			want:     `{"errorWorkflow":null}`,
+		},
+		{
+			name:     "invalid settings_json declares no null",
+			returned: n8nsdk.WorkflowSettings{},
+			planJSON: types.StringValue(`not json`),
+			want:     `{}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			workflow := &n8nsdk.Workflow{Nodes: []n8nsdk.Node{}, Connections: map[string]any{}, Settings: tt.returned}
+			plan := &models.Resource{SettingsJSON: tt.planJSON}
+
+			serializeWorkflowJSON(workflow, plan)
+
+			// Terraform compares settings_json as a string, so the bytes must match.
+			assert.Equal(t, tt.want, plan.SettingsJSON.ValueString())
 		})
 	}
 }
