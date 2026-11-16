@@ -3325,9 +3325,11 @@ func TestWorkflowResource_performUpdateOperations_RemovedSettings(t *testing.T) 
 		responseSettings map[string]any
 		allowReset       bool
 		failFirst        bool
+		dropFirst        bool
 		failRestore      bool
 		ignoreRestore    bool
 		expectWarning    string
+		expectStored     map[string]any
 		expectPuts       int
 		expectSettings   []map[string]any
 		expectError      []string
@@ -3448,6 +3450,21 @@ func TestWorkflowResource_performUpdateOperations_RemovedSettings(t *testing.T) 
 			expectWarning: "Check these settings in the n8n UI",
 		},
 		{
+			name:             "error case - response dropped after n8n stored DEFAULT warns to check the setting",
+			planSettJSON:     `{"executionOrder":"v1"}`,
+			stateSettJSON:    `{"executionOrder":"v1","errorWorkflow":"wf-err"}`,
+			responseSettings: map[string]any{"executionOrder": "v1", "errorWorkflow": "DEFAULT"},
+			allowReset:       true,
+			dropFirst:        true,
+			expectPuts:       1,
+			expectSettings: []map[string]any{
+				{"executionOrder": "v1", "errorWorkflow": "DEFAULT"},
+			},
+			expectStored:  map[string]any{"executionOrder": "v1", "errorWorkflow": "DEFAULT"},
+			expectError:   []string{"Could not update workflow"},
+			expectWarning: "Check these settings in the n8n UI",
+		},
+		{
 			name:             "error case - lost response without a reset does not warn",
 			planSettJSON:     `{"executionOrder":"v1"}`,
 			stateSettJSON:    `{"executionOrder":"v1"}`,
@@ -3471,6 +3488,7 @@ func TestWorkflowResource_performUpdateOperations_RemovedSettings(t *testing.T) 
 
 			var mu sync.Mutex
 			sentSettings := []map[string]any{}
+			var storedSettings map[string]any
 			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				mu.Lock()
 				defer mu.Unlock()
@@ -3497,6 +3515,18 @@ func TestWorkflowResource_performUpdateOperations_RemovedSettings(t *testing.T) 
 				// Like n8n, store and return the restored values unless told to ignore them.
 				if isRestore && !tt.ignoreRestore {
 					returned = settings
+				}
+				storedSettings = returned
+				// Apply the update, then drop the connection before any response.
+				if tt.dropFirst && !isRestore {
+					conn, _, err := w.(http.Hijacker).Hijack()
+					// Fail the test when the connection cannot be taken over.
+					if err != nil {
+						t.Errorf("hijack failed: %v", err)
+						return
+					}
+					conn.Close()
+					return
 				}
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
@@ -3557,6 +3587,10 @@ func TestWorkflowResource_performUpdateOperations_RemovedSettings(t *testing.T) 
 			// Compare the settings of each request.
 			if tt.expectSettings != nil {
 				assert.Equal(t, tt.expectSettings, sentSettings)
+			}
+			// Check the value n8n kept after the request.
+			if tt.expectStored != nil {
+				assert.Equal(t, tt.expectStored, storedSettings)
 			}
 			warnings := ""
 			// Collect every warning detail.
